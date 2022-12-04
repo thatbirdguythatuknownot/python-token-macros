@@ -8,7 +8,9 @@ import traceback
 
 
 tokens_to_ignore = {tokenize.NEWLINE, tokenize.NL}
+insertable_spaces = {tokenize.NEWLINE, tokenize.NL, tokenize.INDENT}
 bracket_reverse = {')': '(', ']': '[', '}': '{'}
+dummy = tokenize.TokenInfo(60, "", (0, 0), (0, 0), "")
 
 
 class TokenParser:
@@ -18,11 +20,8 @@ class TokenParser:
             self.iterator = [*tokenize.generate_tokens(
                 iter(x for x in lines if x).__next__
             )]
-            #end = self.iterator[-1]
-            #self.iterator = [x for x in self.iterator if x.type]
-            #self.iterator.append(end)
         else:
-            self.iterator = lines
+            self.iterator = lines + [dummy]
         self.length = len(self.iterator)
     def __iter__(self):
         return self
@@ -243,7 +242,7 @@ def _transfer(dict0, dict1, seq, i=0, stop=None, del_sdict_item=False):
 def add_offset(body, a0, a1, copy=True, start=0):
     if copy:
         body = body[:]
-    c = body[0].start[0]
+    c = body[start].start[0]
     if start:
         it = itertools.islice(body, start, None)
     else:
@@ -271,8 +270,6 @@ def add_offset(body, a0, a1, copy=True, start=0):
 
 def transform(to_convert, decode_mode, name_dict={}, varname_dict=None,
               tokens=None, ret=True):
-    real_pos = {}
-    to_append = []
     if varname_dict is None:
         varname_dict = {}
     if tokens is None:
@@ -281,15 +278,18 @@ def transform(to_convert, decode_mode, name_dict={}, varname_dict=None,
     else:
         iterator = TokenParser(to_convert)
     def get_next():
-        tok = next(iterator)
-        to_append.append(tok)
-        return tok
+        try:
+            return next(iterator)
+        except StopIteration:
+            return dummy
+    pos = 0
     for token in iterator:
-        if to_append:
-            tokens.extend(to_append)
-            to_append.clear()
-        #if not ret:
-        #    print("#", token)
+        if iterator.idx - pos > 1:
+            iterator.idx = pos + 1
+            token = iterator.iterator[pos]
+        pos = iterator.idx
+        if token == dummy:
+            continue
         tokens.append(token)
         if token.string == 'def':
             s0, s1 = token.start
@@ -309,22 +309,23 @@ def transform(to_convert, decode_mode, name_dict={}, varname_dict=None,
                 _warn(token)
                 continue
             tokens.pop()
-            del to_append[-5:]
-            token = next(iterator)
+            token = get_next()
             if token.type is tokenize.INDENT:
                 d0, d1 = token.start
                 e0, e1 = token.end
                 d1 = d1 if d1 and e0 <= d0 else 0
                 body = [token._replace(start=(0, 0), end=(e0-d0, e1-d1))]
-                while (token := next(iterator)).type is not tokenize.DEDENT:
+                while (token := get_next()).type is not tokenize.DEDENT:
                     s0, s1 = token.start
                     e0, e1 = token.end
                     d1 = d1 if d1 and e0 <= d0 else 0
                     body.append(token._replace(start=(s0-d0, s1-d1), end=(e0-d0, e1-d1)))
             else:
+                if token.string.isspace() and token.type not in insertable_spaces:
+                    token = get_next()
                 d1 = token.start[1]
                 body = [token._replace(start=(0, 0), end=(0, token.end[1]-d1))]
-                while (token := next(iterator)).type is not tokenize.NEWLINE:
+                while (token := get_next()).type is not tokenize.NEWLINE:
                     body.append(token._replace(
                         start=(0, token.start[1]-d1),
                         end=(0, token.end[1]-d1)
@@ -332,26 +333,20 @@ def transform(to_convert, decode_mode, name_dict={}, varname_dict=None,
             a0, a1 = iterator.iterator[iterator.idx].start
             a0 -= s0
             a1 -= s1
-            if to_append:
-                tokens.extend(to_append)
-                to_append.clear()
             add_offset(iterator.iterator, -a0, -a1, False, iterator.idx)
             name_dict[name] = (params, body)
-            #print(iterator.iterator[iterator.idx:])
         elif token.type is tokenize.NAME:
-            if (token2 := next(iterator)).string != '!':
-                iterator.idx -= 1
+            if (token2 := get_next()).string != '!':
                 continue
             start = token.start
             if token.string not in name_dict or (token2 := get_next()).string != '(':
                 _warn(token2)
                 continue
             tokens.pop()
-            del to_append[-2:]
             (poparams, podefaults, params, defaults, vpargs,
                 koparams, kodefaults, vkwargs), body = name_dict[token.string]
             pargs, kwargs = iterator.args() or ([], {})
-            end = next(iterator).end
+            end = get_next().end
             len_pargs, len_poparams = len(pargs), len(poparams)
             if not len_poparams:
                 scope_vars = {}
@@ -360,7 +355,6 @@ def transform(to_convert, decode_mode, name_dict={}, varname_dict=None,
                 scope_vars = dict(zip(poparams, pargs))
                 pargs = pargs[len_poparams:]
             else:
-                len_pargs = 0
                 scope_vars = dict(zip(poparams, pargs))
                 if len_pargs < len_poparams:
                     poparams = poparams[:]
@@ -376,6 +370,7 @@ def transform(to_convert, decode_mode, name_dict={}, varname_dict=None,
                             scope_vars[param := poparams[i]] = tokenize.TokenInfo(
                                 tokenize.STRING, param, (0, 0), (0, len(param)), param
                             )
+                len_pargs = 0
             len_params = len(params)
             if len_pargs:
                 if len_pargs > len_params:
@@ -391,11 +386,37 @@ def transform(to_convert, decode_mode, name_dict={}, varname_dict=None,
                     scope_vars |= zip(params, pargs)
                     params = params[len_pargs:]
                     len_pargs = 0
-            if kwargs and len_params:
+            if kwargs:
+                if len_params:
+                    params = params[:]
+                    kwargs = kwargs[:]
+                    len_params = _transfer(scope_vars, kwargs, params,
+                                           stop=len_params, del_sdict_item=True)
+                if kwargs and (len_koparams := len(koparams)):
+                    koparams = koparams[:]
+                    len_koparams = _transfer(scope_vars, kwargs, koparams,
+                                             stop=len_koparams, del_sdict_item=True)
+                    if len_koparams:
+                        len_koparams = _transfer(scope_vars, kodefaults, koparams,
+                                                 stop=len_koparams)
+                        if len_koparams:
+                            _warn(message=
+                                "(warning) unaccounted keyword-only "
+                                "parameters; using name as string instead"
+                            )
+                            for i in range(len_pargs, len_koparams):
+                                scope_vars[param := koparams[i]] = tokenize.TokenInfo(
+                                    tokenize.STRING, param, (0, 0), (0, len(param)), param
+                                )
+                if kwargs:
+                    if vkwargs is None:
+                        _warn(message="(warning) unaccounted keyword arguments")
+                    else:
+                        scope_vars[vkwargs] = kwargs
+            else:
                 params = params[:]
-                kwargs = kwargs[:]
-                len_params = _transfer(scope_vars, kwargs, params,
-                                       stop=len_params, del_sdict_item=True)
+            if len_params:
+                len_params = _transfer(scope_vars, defaults, params, stop=len_params)
                 if len_params:
                     _warn(message=
                         "(warning) unaccounted parameters; "
@@ -405,39 +426,19 @@ def transform(to_convert, decode_mode, name_dict={}, varname_dict=None,
                         scope_vars[param := params[i]] = tokenize.TokenInfo(
                             tokenize.STRING, param, (0, 0), (0, len(param)), param
                         )
-                if kwargs and (len_koparams := len(koparams)):
-                    koparams = koparams[:]
-                    len_koparams = _transfer(scope_vars, kwargs, koparams,
-                                             stop=len_koparams, del_sdict_item=True)
-                    if len_koparams:
-                        _warn(message=
-                            "(warning) unaccounted keyword-only "
-                            "parameters; using name as string instead"
-                        )
-                        for i in range(len_pargs, len_koparams):
-                            scope_vars[param := koparams[i]] = tokenize.TokenInfo(
-                                tokenize.STRING, param, (0, 0), (0, len(param)), param
-                            )
-                if kwargs:
-                    if vkwargs is None:
-                        _warn(message="(warning) unaccounted arguments")
-                    else:
-                        scope_vars[vkwargs] = kwargs
             body, a0, a1 = add_offset(body, *start)
-            if to_append:
-                tokens.extend(to_append)
-                to_append.clear()
-            add_offset(iterator.iterator, a0-start[0], body[-1].end[1]-end[1], iterator.idx)
             name_dict_ = name_dict.copy()
-            transform(body, None, name_dict_, scope_vars, tokens, ret=False)
+            body = transform(body, None, name_dict_, scope_vars, tokens, ret=False)
+            e0, e1 = body[-1].end
+            add_offset(iterator.iterator, e0-end[0], e1-end[1],
+                       copy=False, start=iterator.idx)
         elif token.string == '$':
             start = token.start
-            if (token := next(iterator)).type is not tokenize.NAME:
+            if (token := get_next()).type is not tokenize.NAME:
                 _warn(token, message=
                     "(warning) unexpected token: {!r}; ignoring $"
                 )
                 tokens.pop()
-                to_append.append(token)
                 continue
             end = token.end
             tokens.pop()
@@ -452,27 +453,26 @@ def transform(to_convert, decode_mode, name_dict={}, varname_dict=None,
                 )
                 l = None
                 a0 = 0
+                a1 -= end[1]
             else:
                 s0, s1 = iterator.iterator[iterator.idx].start
                 a0 = s0 - end[0]
                 a1 = s1 - end[1]
                 l = varname_dict[name]
                 d0, d1 = l[0].start
-                s0 = start[0] - d0
-                s1 = start[1] - d1
-                #print(s0, s1, l[0])
-                l, _, _ = add_offset(l, s0, s1)
+                l, _, _ = add_offset(l, start[0] - d0, start[1] - d1)
                 e0, e1 = l[-1].end
-                a0 += e0 - end[0]
-                a1 += e1 - end[1]
+                a0 += e0 - s0
+                a1 += e1 - s1
             add_offset(iterator.iterator, a0, a1, copy=False, start=iterator.idx)
             if l:
                 for tok in reversed(l):
                     iterator.iterator.insert(iterator.idx, tok)
             else:
                 iterator.iterator.insert(iterator.idx, tok)
-    if to_append:
-        tokens.extend(to_append)
+        else:
+            continue
+        pos = iterator.idx
     if ret:
         t = tokens[-2]
         if t.type is tokenize.DEDENT:
@@ -490,9 +490,8 @@ def transform(to_convert, decode_mode, name_dict={}, varname_dict=None,
                 start=(s0, s1),
                 end=(s0+a0, s1+a1)
             )
-        print(*tokens, sep='\n')
+        #print(*tokens, sep='\n')
         return tokenize.untokenize(tokens)
-    #tokens.append(iterator.iterator[-1])
     return tokens
 
 
