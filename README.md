@@ -6,10 +6,12 @@ Implementation based on [incdec.py](https://github.com/dankeyy/incdec.py) by [da
 Get local (downloaded/cloned) copies of `macros.py` and `macros_loader.pth` and transfer to `path/to/python/Lib/site-packages`.<br/>
 **Windows commands:**
 ```
+Cmd:
 cd path\to\macros_files
 for /f "tokens=* USEBACKQ" %f in (`py -c "import site; print(site.getsitepackages()[1])"`) do set SYSTEM_SITE_PACKAGES=%f
 copy /y macros.py+macros_loader.pth "%SYSTEM_SITE_PACKAGES%"
 
+Powershell:
 cd path\to\macros_files
 $SYSTEM_SITE_PACKAGES = py -c "import site; print(site.getsitepackages()[1])"
 Copy-Item macros.py,macros_loader.pth $SYSTEM_SITE_PACKAGES
